@@ -1,0 +1,16 @@
+[Desktop Entry]
+Name=Show Desktop
+Name[es]=Mostrar Escritorio
+Comment=Minimize all windows to show the desktop
+Comment[es]=Minimizar todas las ventanas para mostrar el escritorio
+Type=Application
+Exec=cosmic-ext-show-desktop
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Desktop;Show;Minimize;
+Icon=user-desktop-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=50

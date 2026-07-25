@@ -1,0 +1,13 @@
+[package]
+name = "cosmic-ext-show-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcosmic = { git = "https://github.com/pop-os/libcosmic", default-features = false, features = ["applet", "tokio", "wayland", "multi-window"] }
+cctk = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit", rev = "32283d7" }
+cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols", default-features = false, features = ["client"], rev = "32283d7" }
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
