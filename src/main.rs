@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use std::time::Duration;
 
 use cosmic::app::{Core, Task};
 use cosmic::applet;
@@ -27,7 +29,37 @@ use futures::SinkExt;
 use futures::StreamExt;
 use tokio::runtime::Handle;
 
-const SOCKET_PATH: &str = "/tmp/show-desktop-cosmic.sock";
+fn socket_path() -> std::io::Result<PathBuf> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set")
+    })?;
+    let path = PathBuf::from(runtime_dir);
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "XDG_RUNTIME_DIR must be absolute",
+        ));
+    }
+    Ok(path.join("show-desktop-cosmic.sock"))
+}
+
+fn ipc_listener() -> std::io::Result<UnixListener> {
+    let path = socket_path()?;
+    match UnixListener::bind(&path) {
+        Ok(listener) => Ok(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            // Only remove a stale socket; never steal a running instance's endpoint.
+            match UnixStream::connect(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(&path)?;
+                    UnixListener::bind(path)
+                }
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -37,12 +69,14 @@ fn main() -> cosmic::iced::Result {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 && args[1] == "--toggle" {
-        match UnixStream::connect(SOCKET_PATH) {
-            Ok(mut stream) => {
-                let _ = stream.write_all(b"toggle");
-            }
+        match socket_path().and_then(|path| {
+            let mut stream = UnixStream::connect(path)?;
+            stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+            stream.write_all(b"toggle")
+        }) {
+            Ok(()) => {}
             Err(e) => {
-                eprintln!("show-desktop-cosmic: no instance running ({e})");
+                eprintln!("show-desktop-cosmic: failed to send toggle ({e})");
                 std::process::exit(1);
             }
         }
@@ -63,24 +97,13 @@ fn main() -> cosmic::iced::Result {
 // Applet model
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 struct ShowDesktop {
     core: Core,
     showing_desktop: bool,
     hidden_by_us: HashSet<ExtForeignToplevelHandleV1>,
     tx: Option<calloop::channel::Sender<WaylandRequest>>,
     toplevels: Vec<(ExtForeignToplevelHandleV1, ToplevelInfo)>,
-}
-
-impl Default for ShowDesktop {
-    fn default() -> Self {
-        Self {
-            core: Core::default(),
-            showing_desktop: false,
-            hidden_by_us: HashSet::new(),
-            tx: None,
-            toplevels: Vec::new(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -102,8 +125,8 @@ enum WaylandUpdate {
 
 #[derive(Debug, Clone)]
 enum ToplevelUpdate {
-    Add(ExtForeignToplevelHandleV1, ToplevelInfo),
-    Update(ExtForeignToplevelHandleV1, ToplevelInfo),
+    Add(ExtForeignToplevelHandleV1, Box<ToplevelInfo>),
+    Update(ExtForeignToplevelHandleV1, Box<ToplevelInfo>),
     Remove(ExtForeignToplevelHandleV1),
 }
 
@@ -146,9 +169,7 @@ fn ipc_subscription() -> iced::Subscription<Message> {
         iced::stream::channel(
             1,
             move |mut output: futures::channel::mpsc::Sender<Message>| async move {
-                let _ = std::fs::remove_file(SOCKET_PATH);
-
-                let listener = match std::os::unix::net::UnixListener::bind(SOCKET_PATH) {
+                let listener = match ipc_listener() {
                     Ok(l) => l,
                     Err(e) => {
                         tracing::error!("Failed to bind IPC socket: {e}");
@@ -162,9 +183,18 @@ fn ipc_subscription() -> iced::Subscription<Message> {
                     for stream in listener.incoming() {
                         match stream {
                             Ok(mut stream) => {
+                                if stream
+                                    .set_read_timeout(Some(Duration::from_secs(1)))
+                                    .is_err()
+                                {
+                                    continue;
+                                }
                                 let mut buf = [0; 6];
-                                if stream.read_exact(&mut buf).is_ok() && &buf == b"toggle" {
-                                    let _ = tx.unbounded_send(());
+                                if stream.read_exact(&mut buf).is_ok()
+                                    && &buf == b"toggle"
+                                    && tx.unbounded_send(()).is_err()
+                                {
+                                    break;
                                 }
                             }
                             Err(e) => {
@@ -175,8 +205,10 @@ fn ipc_subscription() -> iced::Subscription<Message> {
                     }
                 });
 
-                while let Some(_) = rx.next().await {
-                    let _ = output.send(Message::Toggle).await;
+                while rx.next().await.is_some() {
+                    if output.send(Message::Toggle).await.is_err() {
+                        break;
+                    }
                 }
             },
         )
@@ -246,7 +278,7 @@ impl ToplevelInfoHandler for AppData {
     ) {
         if let Some(info) = self.toplevel_info_state.info(toplevel) {
             let _ = futures::executor::block_on(self.tx.send(WaylandUpdate::Toplevel(
-                ToplevelUpdate::Add(toplevel.clone(), info.clone()),
+                ToplevelUpdate::Add(toplevel.clone(), Box::new(info.clone())),
             )));
         }
     }
@@ -259,7 +291,7 @@ impl ToplevelInfoHandler for AppData {
     ) {
         if let Some(info) = self.toplevel_info_state.info(toplevel) {
             let _ = futures::executor::block_on(self.tx.send(WaylandUpdate::Toplevel(
-                ToplevelUpdate::Update(toplevel.clone(), info.clone()),
+                ToplevelUpdate::Update(toplevel.clone(), Box::new(info.clone())),
             )));
         }
     }
@@ -296,7 +328,7 @@ impl AppData {
         handle: &ExtForeignToplevelHandleV1,
     ) -> Option<
         cosmic::cctk::cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1,
-    > {
+    >{
         self.toplevel_info_state
             .info(handle)?
             .cosmic_toplevel
@@ -310,13 +342,9 @@ cctk::delegate_toplevel_info!(AppData);
 cctk::delegate_toplevel_manager!(AppData);
 delegate_noop!(AppData: ignore cosmic::cctk::wayland_client::protocol::wl_buffer::WlBuffer);
 
-fn wayland_handler(
-    tx: mpsc::Sender<WaylandUpdate>,
-    rx: calloop::channel::Channel<WaylandRequest>,
-) {
+fn wayland_handler(tx: mpsc::Sender<WaylandUpdate>, rx: calloop::channel::Channel<WaylandRequest>) {
     let conn = Connection::connect_to_env().expect("Failed to connect to Wayland compositor");
-    let (globals, event_queue) =
-        registry_queue_init(&conn).expect("Failed to init registry");
+    let (globals, event_queue) = registry_queue_init(&conn).expect("Failed to init registry");
 
     let mut event_loop: calloop::EventLoop<AppData> =
         calloop::EventLoop::try_new().expect("Failed to create event loop");
@@ -337,11 +365,11 @@ fn wayland_handler(
                     }
                 }
                 WaylandRequest::Unminimize(h) => {
-                    let cosmic = state.cosmic_toplevel(&h);
-                    let seat = state.seat.as_ref().cloned();
-                    if let (Some(c), Some(s)) = (cosmic, seat) {
-                        state.toplevel_manager_state.manager.activate(&c, &s);
-                        state.toplevel_manager_state.manager.unset_minimized(&c);
+                    if let Some(cosmic) = state.cosmic_toplevel(&h) {
+                        state
+                            .toplevel_manager_state
+                            .manager
+                            .unset_minimized(&cosmic);
                     }
                 }
             },
@@ -390,10 +418,13 @@ impl cosmic::Application for ShowDesktop {
     const APP_ID: &'static str = "com.system76.CosmicAppletShowDesktop";
 
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
-        (Self {
-            core,
-            ..Default::default()
-        }, Task::none())
+        (
+            Self {
+                core,
+                ..Default::default()
+            },
+            Task::none(),
+        )
     }
 
     fn core(&self) -> &Core {
@@ -407,34 +438,33 @@ impl cosmic::Application for ShowDesktop {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Toggle => {
+                let Some(tx) = &self.tx else {
+                    return Task::none();
+                };
                 if self.showing_desktop {
-                    let handles: Vec<_> = self.hidden_by_us.drain().collect();
-                    if let Some(tx) = &self.tx {
-                        for h in handles {
-                            let _ = tx.send(WaylandRequest::Unminimize(h));
-                        }
-                    }
-                    self.showing_desktop = false;
+                    self.hidden_by_us
+                        .retain(|h| tx.send(WaylandRequest::Unminimize(h.clone())).is_err());
+                    self.showing_desktop = !self.hidden_by_us.is_empty();
                 } else {
                     let to_minimize: Vec<_> = self
                         .toplevels
                         .iter()
                         .filter(|(_, info)| {
-                            !info
-                                .state
-                                .contains(&zcosmic_toplevel_handle_v1::State::Minimized)
+                            info.cosmic_toplevel.is_some()
+                                && !info
+                                    .state
+                                    .contains(&zcosmic_toplevel_handle_v1::State::Minimized)
                         })
                         .map(|(h, _)| h.clone())
                         .collect();
 
                     if !to_minimize.is_empty() {
-                        if let Some(tx) = &self.tx {
-                            for h in &to_minimize {
-                                let _ = tx.send(WaylandRequest::Minimize(h.clone()));
-                                self.hidden_by_us.insert(h.clone());
+                        for h in to_minimize {
+                            if tx.send(WaylandRequest::Minimize(h.clone())).is_ok() {
+                                self.hidden_by_us.insert(h);
                             }
                         }
-                        self.showing_desktop = true;
+                        self.showing_desktop = !self.hidden_by_us.is_empty();
                     }
                 }
             }
@@ -444,22 +474,27 @@ impl cosmic::Application for ShowDesktop {
                 }
                 WaylandUpdate::Finished => {
                     tracing::error!("Wayland handler exited");
+                    self.tx = None;
+                    self.toplevels.clear();
+                    self.hidden_by_us.clear();
+                    self.showing_desktop = false;
                 }
                 WaylandUpdate::Toplevel(t) => match t {
                     ToplevelUpdate::Add(handle, info) => {
                         if !self.toplevels.iter().any(|(h, _)| *h == handle) {
-                            self.toplevels.push((handle, info));
+                            self.toplevels.push((handle, *info));
                         }
                     }
                     ToplevelUpdate::Update(handle, info) => {
                         if let Some((_, existing)) =
                             self.toplevels.iter_mut().find(|(h, _)| *h == handle)
                         {
-                            *existing = info;
+                            *existing = *info;
                         }
                     }
                     ToplevelUpdate::Remove(handle) => {
                         self.hidden_by_us.remove(&handle);
+                        self.showing_desktop = !self.hidden_by_us.is_empty();
                         self.toplevels.retain(|(h, _)| *h != handle);
                     }
                 },

@@ -1,10 +1,10 @@
 # Maintainer: David Kaantun <dkantun@gmail.com>
 pkgname=cosmic-ext-show-desktop
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='COSMIC applet that minimizes/restores all windows (Show Desktop)'
 arch=('x86_64')
-url='https://github.com/Gargadonc/cosmic-ext-show-desktop'
+url='https://github.com/Gargadon/cosmic-ext-show-desktop'
 license=('GPL-3.0-or-later')
 depends=(
     'cosmic-randr'
@@ -12,7 +12,7 @@ depends=(
     'fontconfig'
     'ttf-font'
 )
-makedepends=('cargo' 'rust')
+makedepends=('cargo' 'rust' 'git')
 source=("$pkgname-$pkgver.tar.gz::${url}/archive/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 

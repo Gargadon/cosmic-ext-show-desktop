@@ -13,9 +13,9 @@ A COSMIC panel applet that minimizes all open windows to show the desktop. Click
 ### From source
 
 ```sh
-git clone https://github.com/your-username/cosmic-ext-show-desktop
+git clone https://github.com/Gargadon/cosmic-ext-show-desktop
 cd cosmic-ext-show-desktop
-sudo ./build.sh
+./build.sh
 ```
 
 > **Note:** Uses Git dependencies (`libcosmic`, `cosmic-protocols`) pinned to specific revisions — network required.
@@ -38,7 +38,7 @@ Configure a custom shortcut in *COSMIC Settings → Keyboard → Keyboard Shortc
 - **Command:** `cosmic-ext-show-desktop --toggle`
 - **Key:** e.g. <kbd>Super</kbd>+<kbd>D</kbd>
 
-The `--toggle` flag sends a signal to the running applet via a Unix socket (`/tmp/show-desktop-cosmic.sock`).
+The `--toggle` flag sends a signal to the running applet via a Unix socket (`$XDG_RUNTIME_DIR/show-desktop-cosmic.sock`).
 
 ## Build requirements
 

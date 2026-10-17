@@ -2,7 +2,8 @@
 set -euo pipefail
 
 echo "==> Building cosmic-ext-show-desktop..."
-cargo build --release
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+cargo build --release --locked
 
 echo "==> Installing binary..."
 sudo install -Dm755 target/release/cosmic-ext-show-desktop /usr/bin/cosmic-ext-show-desktop
